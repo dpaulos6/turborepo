@@ -192,6 +192,12 @@ impl UIMode {
     pub fn use_tui(&self) -> bool {
         matches!(self, Self::Tui)
     }
+
+    /// Returns true if the UI mode has a sender,
+    /// i.e. web or tui but not stream
+    pub fn has_sender(&self) -> bool {
+        matches!(self, Self::Tui | Self::Web)
+    }
 }
 
 #[derive(Serialize, Default, Debug, PartialEq, Clone, Iterable, Deserializable)]

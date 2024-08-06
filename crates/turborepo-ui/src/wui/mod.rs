@@ -55,6 +55,13 @@ impl WebUISender {
             .ok();
     }
 
+    pub fn restart_tasks(&self, tasks: Vec<String>) -> Result<(), crate::Error> {
+        self.tx
+            .send(WebUIEvent::RestartTasks { tasks })
+            .map_err(Error::Broadcast)?;
+        Ok(())
+    }
+
     pub fn end_task(&self, task: String, result: TaskResult) {
         self.tx.send(WebUIEvent::EndTask { task, result }).ok();
     }
@@ -125,6 +132,9 @@ pub enum WebUIEvent {
         result: CacheResult,
     },
     UpdateTasks {
+        tasks: Vec<String>,
+    },
+    RestartTasks {
         tasks: Vec<String>,
     },
     Stop,

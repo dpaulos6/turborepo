@@ -6,13 +6,13 @@ use crate::{
     wui,
 };
 
+/// Enum to abstract over sending events to either the Tui or the Web UI
 #[derive(Debug, Clone)]
 pub enum UISender {
     Tui(tui::TuiSender),
     Wui(wui::WebUISender),
 }
 
-/// Trait to abstract over sending events to either the Tui or the Web UI
 impl UISender {
     pub fn start_task(&self, task: String, output_logs: OutputLogs) {
         match self {
@@ -20,6 +20,14 @@ impl UISender {
             UISender::Wui(sender) => sender.start_task(task, output_logs),
         }
     }
+
+    pub fn restart_tasks(&self, tasks: Vec<String>) -> Result<(), crate::Error> {
+        match self {
+            UISender::Tui(sender) => sender.restart_tasks(tasks),
+            UISender::Wui(sender) => sender.restart_tasks(tasks),
+        }
+    }
+
     pub fn end_task(&self, task: String, result: TaskResult) {
         match self {
             UISender::Tui(sender) => sender.end_task(task, result),

@@ -26,13 +26,14 @@ use turborepo_telemetry::events::{
 };
 use turborepo_ui::{
     sender::{TaskSender, UISender},
-    tui::{self, event::CacheResult, AppSender, TuiTask},
+    tui::event::CacheResult,
     ColorConfig, ColorSelector, OutputClient, OutputSink, OutputWriter, PrefixedUI,
 };
 use which::which;
 
 use crate::{
     cli::EnvMode,
+    config::UIMode,
     engine::{Engine, ExecutionOptions, StopExecution},
     opts::RunOpts,
     process::{ChildExit, Command, ProcessManager},
@@ -667,6 +668,7 @@ impl<'a> ExecContextFactory<'a> {
         let task_id_string = &task_id.to_string();
         ExecContext {
             engine: self.engine.clone(),
+            ui_mode: self.visitor.run_opts.ui_mode,
             color_config: self.visitor.color_config,
             is_github_actions: self.visitor.run_opts.is_github_actions,
             pretty_prefix: self
@@ -706,7 +708,7 @@ impl<'a> ExecContextFactory<'a> {
 struct ExecContext {
     engine: Arc<Engine>,
     color_config: ColorConfig,
-    experimental_ui: bool,
+    ui_mode: UIMode,
     is_github_actions: bool,
     pretty_prefix: StyledObject<String>,
     task_id: TaskId<'static>,
@@ -868,7 +870,7 @@ impl ExecContext {
         let task_start = Instant::now();
         let mut prefixed_ui = self.prefixed_ui(output_client);
 
-        if self.experimental_ui {
+        if self.ui_mode.has_sender() {
             if let TaskOutput::UI(task) = output_client {
                 let output_logs = self.task_cache.output_logs().into();
                 task.start(output_logs);
@@ -919,7 +921,7 @@ impl ExecContext {
         cmd.env("TURBO_HASH", &self.task_hash);
 
         // Allow downstream tools to detect if the task is being ran with TUI
-        if self.experimental_ui {
+        if self.ui_mode.use_tui() {
             cmd.env("TURBO_IS_TUI", "true");
         }
 
@@ -956,7 +958,7 @@ impl ExecContext {
             }
         };
 
-        if self.experimental_ui && self.takes_input {
+        if self.ui_mode.has_sender() && self.takes_input {
             if let TaskOutput::UI(task) = output_client {
                 if let Some(stdin) = process.stdin() {
                     task.set_stdin(stdin);

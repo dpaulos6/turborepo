@@ -95,8 +95,11 @@ impl TuiSender {
     }
 
     /// Restart the list of tasks displayed in the TUI
-    pub fn restart_tasks(&self, tasks: Vec<String>) -> Result<(), mpsc::SendError<Event>> {
-        self.primary.send(Event::RestartTasks { tasks })
+    pub fn restart_tasks(&self, tasks: Vec<String>) -> Result<(), crate::Error> {
+        Ok(self
+            .primary
+            .send(Event::RestartTasks { tasks })
+            .map_err(|err| Error::Mpsc(err.to_string()))?)
     }
 }
 

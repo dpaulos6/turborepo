@@ -32,7 +32,8 @@ use turborepo_repository::package_graph::{PackageGraph, PackageName, PackageNode
 use turborepo_scm::SCM;
 use turborepo_telemetry::events::generic::GenericEventBuilder;
 use turborepo_ui::{
-    cprint, cprintln, tui, tui::TuiSender, wui::WebUISender, ColorConfig, BOLD_GREY, GREY,
+    cprint, cprintln, sender::UISender, tui, tui::TuiSender, wui::WebUISender, ColorConfig,
+    BOLD_GREY, GREY,
 };
 
 pub use crate::run::error::Error;

@@ -8,6 +8,5 @@ packages:
   - "!packages/turbo"
   - "crates/*/js"
   - examples
-  - web-ui
   # Exclude the non-monorepo example as it should be treated as independent of this repo
   - "!examples/non-monorepo"
