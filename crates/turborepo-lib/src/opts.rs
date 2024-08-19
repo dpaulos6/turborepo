@@ -503,7 +503,7 @@ mod test {
             only: opts_input.only,
             dry_run: opts_input.dry_run,
             graph: None,
-            ui_mode: UIMode::Tui,
+            ui_mode: UIMode::Stream,
             single_package: false,
             log_prefix: crate::opts::ResolvedLogPrefix::Task,
             log_order: crate::opts::ResolvedLogOrder::Stream,
