@@ -6117,6 +6117,9 @@ name = "turborepo-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-graphql",
+ "async-graphql-axum",
+ "async-stream",
  "atty",
  "axum 0.7.5",
  "axum-server 0.7.1",

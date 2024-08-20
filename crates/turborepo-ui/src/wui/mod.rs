@@ -8,6 +8,8 @@ use std::{
     sync::{atomic::AtomicU32, Arc},
 };
 
+use async_graphql::{futures_util::Stream, SimpleObject, Subscription, Union};
+use async_stream::stream;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -51,28 +53,30 @@ pub struct WebUISender {
 impl WebUISender {
     pub fn start_task(&self, task: String, output_logs: OutputLogs) {
         self.tx
-            .send(WebUIEvent::StartTask { task, output_logs })
+            .send(WebUIEvent::StartTask(StartTask { task, output_logs }))
             .ok();
     }
 
     pub fn restart_tasks(&self, tasks: Vec<String>) -> Result<(), crate::Error> {
         self.tx
-            .send(WebUIEvent::RestartTasks { tasks })
+            .send(WebUIEvent::RestartTasks(RestartTasks { tasks }))
             .map_err(Error::Broadcast)?;
         Ok(())
     }
 
     pub fn end_task(&self, task: String, result: TaskResult) {
-        self.tx.send(WebUIEvent::EndTask { task, result }).ok();
+        self.tx
+            .send(WebUIEvent::EndTask(EndTask { task, result }))
+            .ok();
     }
 
     pub fn status(&self, task: String, status: String, result: CacheResult) {
         self.tx
-            .send(WebUIEvent::Status {
+            .send(WebUIEvent::Status(Status {
                 task,
                 status,
                 result,
-            })
+            }))
             .ok();
     }
 
@@ -89,12 +93,12 @@ impl WebUISender {
     }
 
     pub fn stop(&self) {
-        self.tx.send(WebUIEvent::Stop).ok();
+        self.tx.send(WebUIEvent::Stop(Stop { stop: true })).ok();
     }
 
     pub fn update_tasks(&self, tasks: Vec<String>) -> Result<(), crate::Error> {
         self.tx
-            .send(WebUIEvent::UpdateTasks { tasks })
+            .send(WebUIEvent::UpdateTasks(UpdateTasks { tasks }))
             .map_err(Error::Broadcast)?;
 
         Ok(())
@@ -102,42 +106,65 @@ impl WebUISender {
 
     pub fn output(&self, task: String, output: Vec<u8>) -> Result<(), crate::Error> {
         self.tx
-            .send(WebUIEvent::TaskOutput { task, output })
+            .send(WebUIEvent::TaskOutput(TaskOutput { task, output }))
             .map_err(Error::Broadcast)?;
 
         Ok(())
     }
 }
 
+#[derive(Debug, Clone, SimpleObject, Serialize)]
+struct StartTask {
+    task: String,
+    output_logs: OutputLogs,
+}
+
+#[derive(Debug, Clone, SimpleObject, Serialize)]
+struct TaskOutput {
+    task: String,
+    output: Vec<u8>,
+}
+
+#[derive(Debug, Clone, SimpleObject, Serialize)]
+struct EndTask {
+    task: String,
+    result: TaskResult,
+}
+
+#[derive(Debug, Clone, SimpleObject, Serialize)]
+struct Status {
+    task: String,
+    status: String,
+    result: CacheResult,
+}
+
+#[derive(Debug, Clone, SimpleObject, Serialize)]
+struct UpdateTasks {
+    tasks: Vec<String>,
+}
+
+#[derive(Debug, Clone, SimpleObject, Serialize)]
+struct RestartTasks {
+    tasks: Vec<String>,
+}
+
+#[derive(Debug, Clone, SimpleObject, Serialize)]
+struct Stop {
+    stop: bool,
+}
+
 // Specific events that the websocket server can send to the client,
 // not all the `Event` types from the TUI
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Union)]
 #[serde(tag = "type", content = "payload")]
 pub enum WebUIEvent {
-    StartTask {
-        task: String,
-        output_logs: OutputLogs,
-    },
-    TaskOutput {
-        task: String,
-        output: Vec<u8>,
-    },
-    EndTask {
-        task: String,
-        result: TaskResult,
-    },
-    Status {
-        task: String,
-        status: String,
-        result: CacheResult,
-    },
-    UpdateTasks {
-        tasks: Vec<String>,
-    },
-    RestartTasks {
-        tasks: Vec<String>,
-    },
-    Stop,
+    StartTask(StartTask),
+    TaskOutput(TaskOutput),
+    EndTask(EndTask),
+    Status(Status),
+    UpdateTasks(UpdateTasks),
+    RestartTasks(RestartTasks),
+    Stop(Stop),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,6 +202,17 @@ impl Clone for AppState {
     }
 }
 
+#[Subscription]
+impl AppState {
+    async fn events<'a>(&'a self) -> impl Stream<Item = WebUIEvent> + 'a {
+        let mut rx = self.rx.resubscribe();
+        stream! {
+            while let Ok(event) = rx.recv().await {
+                yield event;
+            }
+        }
+    }
+}
 async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }

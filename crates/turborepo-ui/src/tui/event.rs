@@ -1,3 +1,4 @@
+use async_graphql::Enum;
 use serde::Serialize;
 
 pub enum Event {
@@ -49,20 +50,20 @@ pub enum Event {
     },
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Enum)]
 pub enum TaskResult {
     Success,
     Failure,
     CacheHit,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Enum)]
 pub enum CacheResult {
     Hit,
     Miss,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Enum)]
 pub enum OutputLogs {
     // Entire task output is persisted after run
     Full,
