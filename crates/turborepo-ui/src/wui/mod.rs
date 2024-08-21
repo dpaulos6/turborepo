@@ -151,7 +151,10 @@ enum SubscriptionMessage {
 }
 
 // Specific events that the GraphQL server can send to the client,
-// not all the `Event` types from the TUI
+// not all the `Event` types from the TUI.
+//
+// We have to put each variant in a new struct because async graphql doesn't
+// allow enums with fields for union types
 #[derive(Debug, Clone, Serialize, Union)]
 #[serde(tag = "type", content = "payload")]
 pub enum WebUIEvent {
@@ -348,7 +351,7 @@ async fn graphiql() -> impl IntoResponse {
     response::Html(
         GraphiQLSource::build()
             .endpoint("/")
-            .subscription_endpoint("/ws")
+            .subscription_endpoint("/subscriptions")
             .finish(),
     )
 }
