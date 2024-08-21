@@ -1,29 +1,18 @@
 //! Web UI for Turborepo. Creates a WebSocket server that can be subscribed to
 //! by a web client to display the status of tasks.
 
-use std::{
-    cell::RefCell,
-    collections::HashSet,
-    io::Write,
-    sync::{atomic::AtomicU32, Arc},
-};
+use std::{cell::RefCell, collections::HashMap, io::Write, sync::Arc};
 
-use async_graphql::{futures_util::Stream, SimpleObject, Subscription, Union};
-use async_stream::stream;
-use axum::{
-    extract::{
-        ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
-    },
-    http::Method,
-    response::IntoResponse,
-    routing::get,
-    Router,
+use async_graphql::{
+    futures_util::Stream, http::GraphiQLSource, EmptyMutation, Object, Schema, SimpleObject,
+    Subscription, Union,
 };
+use async_graphql_axum::{GraphQL, GraphQLSubscription};
+use async_stream::stream;
+use axum::{response, response::IntoResponse, routing::get, Router};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::{select, sync::Mutex};
-use tower_http::cors::{Any, CorsLayer};
+use tokio::{net::TcpListener, sync::Mutex};
 use tracing::log::warn;
 
 use crate::{
@@ -33,7 +22,7 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("failed to start websocket server")]
+    #[error("failed to start server")]
     Server(#[from] std::io::Error),
     #[error("failed to start websocket server: {0}")]
     WebSocket(#[source] axum::Error),
@@ -93,7 +82,7 @@ impl WebUISender {
     }
 
     pub fn stop(&self) {
-        self.tx.send(WebUIEvent::Stop(Stop { stop: true })).ok();
+        self.tx.send(WebUIEvent::Stop(Stop { _stop: true })).ok();
     }
 
     pub fn update_tasks(&self, tasks: Vec<String>) -> Result<(), crate::Error> {
@@ -114,46 +103,54 @@ impl WebUISender {
 }
 
 #[derive(Debug, Clone, SimpleObject, Serialize)]
-struct StartTask {
+pub struct StartTask {
     task: String,
     output_logs: OutputLogs,
 }
 
 #[derive(Debug, Clone, SimpleObject, Serialize)]
-struct TaskOutput {
+pub struct TaskOutput {
     task: String,
     output: Vec<u8>,
 }
 
 #[derive(Debug, Clone, SimpleObject, Serialize)]
-struct EndTask {
+pub struct EndTask {
     task: String,
     result: TaskResult,
 }
 
 #[derive(Debug, Clone, SimpleObject, Serialize)]
-struct Status {
+pub struct Status {
     task: String,
     status: String,
     result: CacheResult,
 }
 
 #[derive(Debug, Clone, SimpleObject, Serialize)]
-struct UpdateTasks {
+pub struct UpdateTasks {
     tasks: Vec<String>,
 }
 
 #[derive(Debug, Clone, SimpleObject, Serialize)]
-struct RestartTasks {
+pub struct RestartTasks {
     tasks: Vec<String>,
 }
 
 #[derive(Debug, Clone, SimpleObject, Serialize)]
-struct Stop {
-    stop: bool,
+pub struct Stop {
+    // This doesn't actually do anything, but we need a field for GraphQL
+    _stop: bool,
 }
 
-// Specific events that the websocket server can send to the client,
+#[derive(Debug, Clone, Serialize, Union)]
+enum SubscriptionMessage {
+    InitialState(WebUIState),
+    #[graphql(flatten)]
+    Event(WebUIEvent),
+}
+
+// Specific events that the GraphQL server can send to the client,
 // not all the `Event` types from the TUI
 #[derive(Debug, Clone, Serialize, Union)]
 #[serde(tag = "type", content = "payload")]
@@ -184,140 +181,206 @@ pub enum ClientMessage {
     CatchUp { start_id: u32 },
 }
 
-struct AppState {
+#[derive(Debug, Clone, Serialize, SimpleObject)]
+struct TaskState {
+    output: Vec<u8>,
+    status: Option<String>,
+    result: Option<TaskResult>,
+    cache_result: Option<CacheResult>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, SimpleObject)]
+struct WebUIState {
+    tasks: HashMap<String, TaskState>,
+}
+
+struct Subscriber {
     rx: tokio::sync::broadcast::Receiver<WebUIEvent>,
     // We use a tokio::sync::Mutex here because we want this future to be Send.
     #[allow(clippy::type_complexity)]
-    messages: Arc<Mutex<RefCell<Vec<(WebUIEvent, u32)>>>>,
-    current_id: Arc<AtomicU32>,
+    state: Arc<Mutex<RefCell<WebUIState>>>,
 }
 
-impl Clone for AppState {
+impl Subscriber {
+    fn new(rx: tokio::sync::broadcast::Receiver<WebUIEvent>) -> Self {
+        Self {
+            rx,
+            state: Default::default(),
+        }
+    }
+
+    fn watch(&self) {
+        let mut rx = self.rx.resubscribe();
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = rx.recv().await {
+                Self::add_message(&state, event).await;
+            }
+        });
+    }
+
+    async fn add_message(state: &Arc<Mutex<RefCell<WebUIState>>>, event: WebUIEvent) {
+        let state = state.lock().await;
+
+        match event {
+            WebUIEvent::StartTask(StartTask {
+                task,
+                output_logs: _,
+            }) => {
+                state.borrow_mut().tasks.insert(
+                    task,
+                    TaskState {
+                        output: Vec::new(),
+                        status: None,
+                        result: None,
+                        cache_result: None,
+                    },
+                );
+            }
+            WebUIEvent::TaskOutput(TaskOutput { task, output }) => {
+                state
+                    .borrow_mut()
+                    .tasks
+                    .get_mut(&task)
+                    .unwrap()
+                    .output
+                    .extend(output);
+            }
+            WebUIEvent::EndTask(EndTask { task, result }) => {
+                state.borrow_mut().tasks.get_mut(&task).unwrap().result = Some(result);
+            }
+            WebUIEvent::Status(Status { task, result, .. }) => {
+                state
+                    .borrow_mut()
+                    .tasks
+                    .get_mut(&task)
+                    .unwrap()
+                    .cache_result = Some(result);
+            }
+            WebUIEvent::Stop(_) => {
+                // TODO: stop watching
+            }
+            WebUIEvent::UpdateTasks(UpdateTasks { tasks }) => {
+                state.borrow_mut().tasks = tasks
+                    .into_iter()
+                    .map(|task| {
+                        (
+                            task,
+                            TaskState {
+                                output: Vec::new(),
+                                status: None,
+                                result: None,
+                                cache_result: None,
+                            },
+                        )
+                    })
+                    .collect();
+            }
+            WebUIEvent::RestartTasks(RestartTasks { tasks }) => {
+                state.borrow_mut().tasks = tasks
+                    .into_iter()
+                    .map(|task| {
+                        (
+                            task,
+                            TaskState {
+                                output: Vec::new(),
+                                status: None,
+                                result: None,
+                                cache_result: None,
+                            },
+                        )
+                    })
+                    .collect();
+            }
+        }
+    }
+}
+
+impl Clone for Subscriber {
     fn clone(&self) -> Self {
         Self {
             rx: self.rx.resubscribe(),
-            messages: self.messages.clone(),
-            current_id: self.current_id.clone(),
+            state: self.state.clone(),
         }
     }
 }
 
 #[Subscription]
-impl AppState {
-    async fn events<'a>(&'a self) -> impl Stream<Item = WebUIEvent> + 'a {
+impl Subscriber {
+    async fn events<'a>(&'a self) -> impl Stream<Item = SubscriptionMessage> + 'a {
         let mut rx = self.rx.resubscribe();
+        let state = self.state.clone();
+
         stream! {
+            // There's a race condition where the channel receiver can be out of sync with the state.
+            {
+                let message = SubscriptionMessage::InitialState(state.lock().await.borrow().clone());
+                yield message;
+            }
+
             while let Ok(event) = rx.recv().await {
-                yield event;
+                yield SubscriptionMessage::Event(event);
             }
         }
     }
 }
-async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+
+struct Query {
+    app_state: Subscriber,
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
-    if let Err(e) = handle_socket_inner(socket, state).await {
-        warn!("error handling socket: {e}");
+#[Object]
+impl Query {
+    async fn tasks(&self) -> HashMap<String, TaskState> {
+        self.app_state
+            .state
+            .lock()
+            .await
+            .borrow()
+            .tasks
+            .iter()
+            .map(|(task, state)| (task.clone(), state.clone()))
+            .collect()
     }
 }
 
-async fn handle_socket_inner(mut socket: WebSocket, state: AppState) -> Result<(), Error> {
-    let mut state = state.clone();
-    let mut acks = HashSet::new();
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
-    'socket_loop: loop {
-        select! {
-            biased;
-            Ok(event) = state.rx.recv() => {
-                let id = state.current_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-                let message_payload = serde_json::to_string(&ServerMessage {
-                    id,
-                    payload: &event
-                })?;
-                state.messages.lock().await.borrow_mut().push((event, id));
-
-                socket.send(Message::Text(message_payload)).await?;
-            }
-            // Every 100ms, check if we need to resend any messages
-            _ = interval.tick() => {
-                let messages = state.messages.lock().await;
-                let mut messages_to_send = Vec::new();
-                for (event, id) in messages.borrow().iter() {
-                    if !acks.contains(id) {
-                        let message_payload = serde_json::to_string(event).unwrap();
-                        messages_to_send.push(Message::Text(message_payload));
-                    }
-                };
-
-                for message in messages_to_send {
-                    socket.send(message).await?;
-                }
-            }
-            message = socket.recv() => {
-                if let Some(Ok(message)) = message {
-                    let message_payload = message.into_text()?;
-                    if message_payload.is_empty() {
-                        continue;
-                    }
-                    if let Ok(event) = serde_json::from_str::<ClientMessage>(&message_payload) {
-                        match event {
-                            ClientMessage::Ack { id } => {
-                                acks.insert(id);
-                            }
-                            ClientMessage::CatchUp { start_id } => {
-                                let mut messages_to_send = Vec::new();
-                                for (event, id) in state.messages.lock().await.borrow().iter() {
-                                    if id >= &start_id {
-                                        continue;
-                                    }
-                                    let message_payload = serde_json::to_string(event).unwrap();
-                                    messages_to_send.push(Message::Text(message_payload));
-                                }
-
-                                for message in messages_to_send {
-                                    socket.send(message).await?;
-                                }
-                            }
-                        }
-                    } else {
-                        warn!("failed to deserialize message from client: {message_payload}");
-                    }
-                } else {
-                    break 'socket_loop;
-                }
-            },
-        }
-    }
-
-    Ok(())
+async fn graphiql() -> impl IntoResponse {
+    response::Html(
+        GraphiQLSource::build()
+            .endpoint("/")
+            .subscription_endpoint("/ws")
+            .finish(),
+    )
 }
 
-pub async fn start_ws_server(
+pub async fn start_server(
     rx: tokio::sync::broadcast::Receiver<WebUIEvent>,
 ) -> Result<(), crate::Error> {
-    let cors = CorsLayer::new()
-        // allow `GET` and `POST` when accessing the resource
-        .allow_methods([Method::GET, Method::POST])
-        // allow requests from any origin
-        .allow_origin(Any);
+    let subscriber = Subscriber::new(rx);
+    subscriber.watch();
 
+    let schema = Schema::new(
+        Query {
+            app_state: subscriber.clone(),
+        },
+        EmptyMutation,
+        subscriber,
+    );
     let app = Router::new()
-        .route("/ws", get(handler))
-        .layer(cors)
-        .with_state(AppState {
-            rx,
-            messages: Default::default(),
-            current_id: Arc::new(AtomicU32::new(0)),
-        });
+        .route(
+            "/",
+            get(graphiql).post_service(GraphQL::new(schema.clone())),
+        )
+        .route_service("/subscriptions", GraphQLSubscription::new(schema));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:1337")
-        .await
-        .map_err(Error::Server)?;
-    println!("Web UI listening on port 1337...");
-    axum::serve(listener, app).await.map_err(Error::Server)?;
+    axum::serve(
+        TcpListener::bind("127.0.0.1:8000")
+            .await
+            .map_err(Error::Server)?,
+        app,
+    )
+    .await
+    .map_err(Error::Server)?;
 
     Ok(())
 }
