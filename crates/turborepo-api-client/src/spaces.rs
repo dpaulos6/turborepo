@@ -13,6 +13,15 @@ pub enum RunStatus {
     Completed,
 }
 
+impl AsRef<str> for RunStatus {
+    fn as_ref(&self) -> &str {
+        match self {
+            RunStatus::Running => "RUNNING",
+            RunStatus::Completed => "COMPLETED",
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct SpaceClientSummary {
     pub id: &'static str,
@@ -144,13 +153,13 @@ impl APIClient {
         &self,
         space_id: &str,
         api_auth: &APIAuth,
-        payload: CreateSpaceRunPayload,
+        payload: &CreateSpaceRunPayload,
     ) -> Result<SpaceRun, Error> {
         let url = format!("/v0/spaces/{}/runs", space_id);
         let request_builder = self
             .create_request_builder(&url, api_auth, Method::POST)
             .await?
-            .json(&payload);
+            .json(payload);
 
         let response =
             retry::make_retryable_request(request_builder, retry::RetryStrategy::Timeout)
@@ -167,7 +176,7 @@ impl APIClient {
         space_id: &str,
         run_id: &str,
         api_auth: &APIAuth,
-        task: SpaceTaskSummary,
+        task: &SpaceTaskSummary,
     ) -> Result<(), Error> {
         let request_builder = self
             .create_request_builder(
@@ -176,7 +185,7 @@ impl APIClient {
                 Method::POST,
             )
             .await?
-            .json(&task);
+            .json(task);
 
         retry::make_retryable_request(request_builder, retry::RetryStrategy::Timeout)
             .await?
